@@ -1,7 +1,3 @@
-# HP-200LX-DB-Database-Exporter
-for exporting .GDB, .PDB, and .NDB to CSV and TXT
-
-
 # HP 100LX / 200LX Database to CSV and Text Converter
 
 A standalone Python 3 utility for exporting supported **HP 100LX / HP 200LX** System Manager database files to modern, readable **CSV** or **plain-text (`.txt`)** files.
@@ -12,7 +8,7 @@ The script is named [`hp200lx_db_to_csv.py`](hp200lx_db_to_csv.py). Despite its 
 - Uses **only the Python standard library**; no packages to install.
 - Reads the database **without modifying the original file**.
 - Exports field names, data records, and linked **Note** text.
-- Accepts supported unencrypted `.GDB`, `.PDB`, and `.NDB` database structures.
+- Accepts supported **unencrypted and password-protected** `.GDB`, `.PDB`, and `.NDB` database structures.
 - Outputs UTF-8 (with a BOM for compatibility with Microsoft Excel).
 
 > **Important:** This is an independent, read-only exporter, not an HP System Manager emulator or a fully general-purpose HP database implementation. Not every HP palmtop application file is supported. Keep a copy of your original database.
@@ -20,7 +16,7 @@ The script is named [`hp200lx_db_to_csv.py`](hp200lx_db_to_csv.py). Despite its 
 ## Requirements
 
 - Python **3.9 or newer** is recommended. The script has no third-party dependencies.
-- A supported, unencrypted database file copied from an HP 100LX / 200LX or its storage card.
+- A supported database file (unencrypted or password-protected) copied from an HP 100LX / 200LX or its storage card.
 - The file `hp200lx_db_to_csv.py` from this repository.
 
 Check Python is installed:
@@ -60,6 +56,18 @@ python3 hp200lx_db_to_csv.py CONTACTS.GDB CONTACTS.txt
 ```
 
 The input file is not altered. **Existing output files can be overwritten**, so choose a new output filename when appropriate.
+
+### Password-protected databases
+
+Password-protected HP 100LX/200LX generic database files are decrypted **automatically in memory** before export. No password entry or extra command-line option is needed for this historical scheme, because the original file stores enough information to recover its 17-byte session key. For example:
+
+```powershell
+python hp200lx_db_to_csv.py PROTECTED.NDB exported.txt
+```
+
+The exported text/CSV is **not encrypted**. Treat it as sensitive and never publish anyone else's personal data. The original protected file remains unchanged.
+
+> This is compatibility with a weak, historical XOR-based record-scrambling scheme, not a general password cracker for modern formats. It does not mean other HP application formats, such as Lotus 1-2-3, Memo, Pocket Quicken, or arbitrary encrypted files, are supported.
 
 ## Command-line usage
 
@@ -189,13 +197,13 @@ Fields:  Name, Address, Telephone, Note
 
 ## Supported data and current limitations
 
-The script recognises the HP `hcD` database signature and supported GDB/PDB (`0x44`) and NDB (`0x4E`) internal type markers. It reads field definitions, data records, and separately stored Note records using the database's internal lookup table.
+The script recognises the HP `hcD` database signature and supported GDB/PDB (`0x44`) and NDB (`0x4E`) internal type markers. It reads field definitions, data records, and separately stored Note records using the database's internal lookup table. For password-protected files, it reconstructs the original HP session key from a type-1 password record and decodes each record payload with the legacy algorithm.
 
 Supported field handling includes common text, numeric-text, checkbox/boolean, radio-button, time, date, and Note fields. Values are exported as text. The parser also skips known GUI-only field definitions.
 
 **Not supported or not guaranteed:**
 
-- **Encrypted/password-protected databases**: the tool refuses these rather than attempting to decrypt them.
+- Password schemes other than the supported legacy HP generic-database password record (type 1, 17-byte payload). Unsupported password layouts are rejected.
 - Other application database types outside the supported internal markers.
 - Every unusual/undocumented field representation or damaged/corrupt database; the converter raises an error for unsupported layouts instead of silently discarding data.
 - Writing changes back to `.GDB`/`.PDB`/`.NDB` or reconstructing the original file from a CSV/TXT export.
@@ -214,7 +222,7 @@ Supported field handling includes common text, numeric-text, checkbox/boolean, r
 | `No such file or directory` / `FileNotFoundError` | Check the working directory and filenames. Use quoted paths if they contain spaces. |
 | `Not an HP 100LX/200LX database (missing hcD header)` | The input is not in the expected database format, or it may be compressed/encapsulated/damaged. |
 | `Unsupported HP application database type` | The file uses a different internal HP application format; a `.GDB` extension alone is not sufficient. |
-| `Password-protected databases aren't supported` | Open/export the database with authorised original software first; this script does not bypass passwords. |
+| `Unsupported HP password record layout` | The file does not use the 17-byte legacy password record supported by this converter. Try exporting through original software. |
 | `Record ...`, `lookup table ...`, `Truncated ...`, or `Unsupported field type ...` | This may be a damaged, variant, or unimplemented record/field layout. Preserve the original file and retain the full error message for investigation. |
 | Accented characters look wrong | Try `--encoding cp850` instead of the default `cp437` (or another appropriate Python-supported code page). |
 | Notes appear on several physical lines in the CSV | This is normal for quoted multiline CSV cells. Use `--note-newlines space` or `dollar` if needed. |
@@ -235,10 +243,11 @@ The converter is a standalone reader implemented with Python's `struct`, `csv` a
 
 1. Validates the HP `hcD` signature and database header.
 2. Locates and checks the internal record lookup table.
-3. Parses field definitions, skipping recognised non-data controls.
-4. Resolves data record values, including references to separately stored Note records.
-5. Decodes source text using the selected DOS code page.
-6. Writes CSV or labelled TXT in UTF-8.
+3. When a legacy type-1 password record is present, reconstructs its session key and reverses the original per-record XOR encoding.
+4. Parses field definitions, skipping recognised non-data controls.
+5. Resolves data record values, including references to separately stored Note records.
+6. Decodes source text using the selected DOS code page.
+7. Writes CSV or labelled TXT in UTF-8.
 
 Corrupt/truncated record references, missing linked notes, duplicate field names, and unsupported field types generally produce explicit errors rather than incomplete exports.
 
@@ -247,13 +256,13 @@ Corrupt/truncated record references, missing linked notes, duplicate field names
 The Python implementation was informed by:
 
 - **OGASA, `DB2CSV.C` / `DB2CSV.DOC`**, *DB2CSV ver. 0.2* (1999): HP System Manager database-to-CSV utility and field-conversion behaviour.
-- **Gerhard Gonter, `HP200LX::DB`** (2001): documentation/implementation of the binary record layout; a copy is available at <https://github.com/laurentd75/hp200lx-db-1>.
+- **Gerhard Gonter, `HP200LX::DB`** (2001): documentation/implementation of the binary record layout and the legacy `decrypt_password`/`decrypt_data` algorithm; a copy is available at <https://github.com/laurentd75/hp200lx-db-1>. The source credits **Curtis Cameron's `dbcheck`** for the decryption method.
 
-The Python utility does **not** require the original HP `lxapi.h`/`dbapi.h` libraries or an HP 200LX to run. The historical material is referenced for attribution and technical background; check applicable rights and licences before redistributing any third-party original source files.
+The Python utility does **not** require the original HP `lxapi.h`/`dbapi.h` libraries or an HP 200LX to run. The decryption routine and constant tables were adapted from the historical Perl implementation, which states that it is available under the same terms as Perl itself. Check the original attribution and licensing terms before distributing derivative code. No original owner's data, passwords, or sample databases should be included in a public repository.
 
 ## Testing and contributing
 
-Development testing included a real HP palmtop database with an internally marked NDB structure: **68 data records**, **53 stored Note records**, and **three fields** exported successfully to both CSV and TXT. This is a useful smoke test, **not a complete compatibility test** for all variants or all field types.
+Development testing included paired, private encrypted and unencrypted copies of an HP palmtop NDB database: **68 data records**, **53 stored Note records**, and **three fields**. Both versions produced **byte-identical** CSV and TXT exports using the same options, including multiline Note fields. The real test database is intentionally excluded from the public package. This is a useful smoke test, **not a complete compatibility test** for all variants or all field types.
 
 If you encounter a database the tool cannot read, please open a GitHub issue with:
 

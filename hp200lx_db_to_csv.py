@@ -3,15 +3,17 @@
 
 Pure Python 3 (standard library only); read-only access to the database.
 
-Based on the field handling in OGASA's DB2CSV.C (1999) and the binary
-record layout documented by Gerhard Gonter's HP200LX::DB (2001):
+Based on OGASA's DB2CSV.C (1999) and Gerhard Gonter's HP200LX::DB (2001):
 https://github.com/laurentd75/hp200lx-db-1
 
-This is a *reader*, not an implementation of the original HP database API.
-Supported: generic, unencrypted GDB/PDB/NDB databases, including Note fields.
-Other application databases, encrypted databases, and exotic field types are
-not currently supported. Any unsupported data field raises an error rather
-than being silently omitted.
+The HP200LX::DB decrypt_data implementation credits Curtis Cameron's dbcheck.
+The legacy algorithm recovers a session key directly from the on-disk
+password record. Password input is not required to read supported databases.
+
+This is a *read-only exporter*, not an implementation of the original HP
+database API. Supports unencrypted and password-protected generic
+GDB/PDB/NDB databases, including linked Note fields. Other application
+databases and exotic field types are not yet supported.
 """
 
 from __future__ import annotations
@@ -35,6 +37,36 @@ SUPPORTED_FILE_TYPES = {0x44: "GDB/PDB", 0x4E: "NDB"}
 
 # Types 11, 12, 14 and 15 describe GUI elements, not user data fields.
 NON_DATA_FIELD_TYPES = {11, 12, 14, 15}
+
+
+# Legacy HP 100LX/200LX record scrambling constants, from Gerhard Gonter's
+# HP200LX::DB / Curtis Cameron's dbcheck implementation. These are not
+# user data and are common to the original file format. This is XOR-based
+# obfuscation, not modern cryptographic protection.
+CRYPT_A = bytes([
+    0xe8, 0xa3, 0xfe, 0x1b, 0x02, 0xce, 0x40, 0x35,
+    0xa4, 0x7b, 0xf2, 0xa1, 0x70, 0xd5, 0x40, 0x65,
+    0x09, 0x42, 0x23, 0xff, 0xaa, 0xed, 0xf0, 0x2a,
+    0xa2, 0xa9, 0x38, 0xd7, 0xe5, 0x95, 0xea, 0x8c,
+    0x46, 0xdd, 0x90, 0x94, 0x5e, 0x6b, 0x5d, 0xa4,
+    0x7b, 0x8c, 0xea, 0x24, 0xa1, 0x7c, 0xaf, 0x30,
+    0x62, 0x2a, 0xa5, 0x8e, 0xad, 0x67, 0xde, 0x3f,
+    0xb3, 0xe3, 0x53, 0xde, 0x19, 0x42, 0xf8, 0x40,
+    0x96, 0xe8, 0x15, 0x75, 0x43, 0x08, 0x2f, 0xe9,
+    0xb1, 0x4f, 0x1d, 0xd5, 0xa9, 0x16, 0x2c, 0xfb,
+    0x9f, 0x0f, 0xb2, 0xcc, 0xe4, 0x27, 0xbc, 0x1b,
+    0x49, 0xa6, 0x90, 0x79, 0x03, 0x9a, 0xa6, 0x1a,
+    0x70, 0x89, 0x9d, 0x35, 0x81, 0xad, 0x80, 0xb0,
+    0x79, 0x45, 0x21, 0x5f, 0x94, 0x1c, 0xd1, 0x3f,
+    0xdf, 0xa8, 0xa3, 0x40, 0x31, 0x34, 0x66, 0x84,
+    0x85, 0x28, 0xf1, 0x8d, 0x82, 0x04, 0xa4,
+])
+CRYPT_B = bytes([
+    0x09, 0x0b, 0x09, 0x0f, 0x09, 0x0b, 0x09, 0x77,
+    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+    0x78,
+])
+assert len(CRYPT_A) == 127 and len(CRYPT_B) == 17
 
 
 class GDBError(ValueError):
@@ -71,6 +103,47 @@ def read_string(buffer: bytes, offset: int, encoding: str) -> str:
     if end < 0:
         raise GDBError("Unterminated string in database record")
     return buffer[offset:end].decode(encoding, errors="strict")
+
+
+def decrypt_payload(payload: bytes, session_key: bytes) -> bytes:
+    """Decrypt one HP database record payload (record header is NOT scrambled).
+
+    The stream resets at the start of every record. The extra 127-byte
+    rounds must be applied to long Note records; omitting them appears to
+    work for short fields, but corrupts long records.
+    """
+    if len(session_key) != 17:
+        raise GDBError("Invalid legacy session key length")
+    result = bytearray(len(payload))
+    # Accumulate the 17-byte correction table at every 127-byte boundary.
+    extra = bytearray(len(payload))
+    for i, value in enumerate(payload):
+        if i >= 127:
+            extra[i] = CRYPT_B[(i - 127) % 17] ^ extra[i - 127]
+        result[i] = value ^ session_key[i % 17] ^ CRYPT_A[i % 127] ^ extra[i]
+    return bytes(result)
+
+
+def decrypt_records(records_by_type: dict[int, list[Record]]) -> None:
+    """Decrypt supported protected database records in memory, never on disk."""
+    passwords = records_by_type.get(1, [])
+    if not passwords:
+        return
+    if len(passwords) != 1 or len(passwords[0].payload) != 17:
+        raise GDBError("Unsupported HP password record layout")
+    key = bytes(
+        value ^ index ^ CRYPT_A[index]
+        for index, value in enumerate(passwords[0].payload)
+    )
+    # HP System Manager scrambles only record payloads with type > 1.
+    # Type 0 is the file header and type 1 stores the obfuscated session key.
+    for kind, records in records_by_type.items():
+        if kind <= 1:
+            continue
+        records_by_type[kind] = [
+            Record(r.type, r.index, r.status, decrypt_payload(r.payload, key), r.position)
+            for r in records
+        ]
 
 
 def parse_file(raw: bytes, encoding: str) -> tuple[list[Field], list[dict[str, str]], str, int]:
@@ -122,8 +195,7 @@ def parse_file(raw: bytes, encoding: str) -> tuple[list[Field], list[dict[str, s
             Record(typ, idx, status, raw[offset + 6:offset + length], offset)
         )
 
-    if by_type.get(1):
-        raise GDBError("Password-protected databases aren't supported")
+    decrypt_records(by_type)
 
     fields: list[Field] = []
     for rec in sorted(by_type.get(6, []), key=lambda r: r.index):
@@ -223,7 +295,7 @@ def text_export(fields: list[Field], rows: list[dict[str, str]], output: Path) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Export an HP 100LX/200LX GDB/PDB/NDB database to UTF-8 CSV or TXT"
+        description="Export an HP 100LX/200LX GDB/PDB/NDB database (including password-protected files) to UTF-8 CSV or TXT"
     )
     parser.add_argument("database", type=Path, help="Input .GDB, .PDB or .NDB file")
     parser.add_argument(

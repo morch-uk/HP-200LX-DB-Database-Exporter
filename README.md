@@ -264,12 +264,7 @@ The Python utility does **not** require the original HP `lxapi.h`/`dbapi.h` libr
 
 Development testing included paired, private encrypted and unencrypted copies of an HP palmtop NDB database: **68 data records**, **53 stored Note records**, and **three fields**. Both versions produced **byte-identical** CSV and TXT exports using the same options, including multiline Note fields. The real test database is intentionally excluded from the public package. This is a useful smoke test, **not a complete compatibility test** for all variants or all field types.
 
-If you encounter a database the tool cannot read, please open a GitHub issue with:
-
-- The command used and complete error message.
-- The palmtop model and originating application, if known.
-- The filename extension and expected field types, if known.
-- A **small synthetic or anonymised test file** if you can create one.
+If you encounter a database the tool cannot read, please ask chatgpt and fork me
 
 **Please do not upload unredacted personal databases or old storage-card contents to public issues.** Such files can contain private information belonging to previous owners.
 
